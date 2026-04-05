@@ -1,47 +1,47 @@
 package com.finance.dashboard.service.impl;
-
+ 
 import com.finance.dashboard.dto.response.DashboardSummary;
 import com.finance.dashboard.dto.response.TransactionResponse;
+import com.finance.dashboard.entity.Transaction;
 import com.finance.dashboard.entity.TransactionType;
 import com.finance.dashboard.repository.TransactionRepository;
 import com.finance.dashboard.service.DashboardService;
-import com.finance.dashboard.service.TransactionService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-
+ 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.Month;
 import java.util.*;
 import java.util.stream.Collectors;
-
+ 
 @Service
 @RequiredArgsConstructor
 public class DashboardServiceImpl implements DashboardService {
-
+ 
     private final TransactionRepository transactionRepository;
     private final TransactionServiceImpl transactionService;
-
+ 
     @Override
     @Transactional(readOnly = true)
     public DashboardSummary getSummary() {
         BigDecimal totalIncome   = transactionRepository.sumByType(TransactionType.INCOME);
         BigDecimal totalExpenses = transactionRepository.sumByType(TransactionType.EXPENSE);
         BigDecimal netBalance    = totalIncome.subtract(totalExpenses);
-
-        Map<String, BigDecimal> incomeByCategory   = buildCategoryMap(TransactionType.INCOME);
-        Map<String, BigDecimal> expensesByCategory  = buildCategoryMap(TransactionType.EXPENSE);
-
+ 
+        Map<String, BigDecimal> incomeByCategory  = buildCategoryMap(TransactionType.INCOME);
+        Map<String, BigDecimal> expensesByCategory = buildCategoryMap(TransactionType.EXPENSE);
+ 
         List<TransactionResponse> recentActivity = transactionRepository
                 .findRecentActivity(PageRequest.of(0, 10))
                 .stream()
                 .map(transactionService::toResponse)
                 .toList();
-
+ 
         List<DashboardSummary.MonthlyTrend> monthlyTrends = buildMonthlyTrends();
-
+ 
         return DashboardSummary.builder()
                 .totalIncome(totalIncome)
                 .totalExpenses(totalExpenses)
@@ -52,38 +52,37 @@ public class DashboardServiceImpl implements DashboardService {
                 .monthlyTrends(monthlyTrends)
                 .build();
     }
-
+ 
     private Map<String, BigDecimal> buildCategoryMap(TransactionType type) {
         List<Object[]> rows = transactionRepository.sumByCategory(type);
         Map<String, BigDecimal> result = new LinkedHashMap<>();
         rows.forEach(row -> result.put((String) row[0], (BigDecimal) row[1]));
         return result;
     }
-
+ 
     private List<DashboardSummary.MonthlyTrend> buildMonthlyTrends() {
-        // Look back 6 months
         LocalDate startDate = LocalDate.now().minusMonths(6).withDayOfMonth(1);
-        List<Object[]> rows = transactionRepository.monthlyTrends(startDate);
-
-        // key: "YEAR-MONTH" → {income, expense}
+ 
+        // Fetch raw transactions and group in Java — avoids H2 FUNCTION() dialect issues
+        List<Transaction> txns = transactionRepository.findForTrends(startDate);
+ 
+        // key: "YEAR-MM"
         Map<String, BigDecimal[]> trendMap = new LinkedHashMap<>();
-
-        for (Object[] row : rows) {
-            int month = ((Number) row[0]).intValue();
-            int year  = ((Number) row[1]).intValue();
-            TransactionType type = TransactionType.valueOf((String) row[2]);
-            BigDecimal amount = (BigDecimal) row[3];
-
+ 
+        for (Transaction t : txns) {
+            int year  = t.getDate().getYear();
+            int month = t.getDate().getMonthValue();
             String key = year + "-" + String.format("%02d", month);
+ 
             trendMap.computeIfAbsent(key, k -> new BigDecimal[]{BigDecimal.ZERO, BigDecimal.ZERO});
-
-            if (type == TransactionType.INCOME) {
-                trendMap.get(key)[0] = amount;
+ 
+            if (t.getType() == TransactionType.INCOME) {
+                trendMap.get(key)[0] = trendMap.get(key)[0].add(t.getAmount());
             } else {
-                trendMap.get(key)[1] = amount;
+                trendMap.get(key)[1] = trendMap.get(key)[1].add(t.getAmount());
             }
         }
-
+ 
         return trendMap.entrySet().stream().map(entry -> {
             String[] parts = entry.getKey().split("-");
             int year  = Integer.parseInt(parts[0]);
